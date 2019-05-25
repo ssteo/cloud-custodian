@@ -72,6 +72,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dateutil.parser import parse as parse_date
 from six.moves.urllib.parse import urlparse
 
+from c7n.config import Bag
+
 sqs = logs = config = None
 
 VERSION = "0.1"
@@ -223,7 +225,7 @@ def get_sentry_message(config, data, log_client=None, is_lambda=True):
         _, level, logger, msg_frag = [s.strip() for s in error_msg[
             error_msg.find(','):].split('-', 3)]
         error_msg = " - ".join([level, logger, msg_frag])
-    except:
+    except Exception:
         level, logger = 'ERROR', None
 
     for f in reversed(error['stacktrace']['frames']):
@@ -288,7 +290,7 @@ def parse_traceback(msg, site_path="site-packages", in_app_prefix="c7n"):
     err_ctx = None
 
     for l in lines[1:-1]:
-        l = l.strip()
+        l = l.strip() # noqa E741
         if l.startswith('Traceback'):
             continue
         elif l.startswith('File'):
@@ -317,7 +319,7 @@ def parse_traceback(msg, site_path="site-packages", in_app_prefix="c7n"):
         'stacktrace': data}
 
 
-def get_function(session_factory, name, handler, role,
+def get_function(session_factory, name, handler, runtime, role,
                  log_groups,
                  project, account_name, account_id,
                  sentry_dsn,
@@ -333,7 +335,7 @@ def get_function(session_factory, name, handler, role,
     config = dict(
         name=name,
         handler=handler,
-        runtime='python2.7',
+        runtime=runtime,
         memory_size=512,
         timeout=15,
         role=role,
@@ -342,7 +344,7 @@ def get_function(session_factory, name, handler, role,
             CloudWatchLogSubscription(
                 session_factory, log_groups, pattern)])
 
-    archive = PythonPackageArchive('c7n_sentry')
+    archive = PythonPackageArchive(modules=['c7n_sentry'])
     archive.add_contents(
         'config.json', json.dumps({
             'project': project,
@@ -360,7 +362,7 @@ def get_function(session_factory, name, handler, role,
 
 
 def orgreplay(options):
-    from .common import Bag, get_accounts
+    from .common import get_accounts
     accounts = get_accounts(options)
 
     auth_headers = {'Authorization': 'Bearer %s' % options.sentry_token}
@@ -462,6 +464,7 @@ def deploy_one(region_name, account, policy, sentry_dsn):
         session_factory=session_factory,
         name='cloud-custodian-sentry',
         handler='handler.process_log_event',
+        runtime=account.get('runtime', 'python2.7'),
         role=account['role'],
         log_groups=[{'logGroupName': log_group_name, 'arn': arn}],
         project=None,
@@ -479,7 +482,8 @@ def setup_parser():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--verbose', default=False, action="store_true")
-    subs = parser.add_subparsers()
+    subs = parser.add_subparsers(dest='command')
+    subs.required = True
 
     cmd_orgreplay = subs.add_parser('orgreplay')
     common_parser(cmd_orgreplay)
@@ -523,7 +527,7 @@ if __name__ == '__main__':
         main()
     except (SystemExit, KeyboardInterrupt):
         raise
-    except:
+    except Exception:
         import traceback, sys, pdb
         traceback.print_exc()
         pdb.post_mortem(sys.exc_info()[-1])

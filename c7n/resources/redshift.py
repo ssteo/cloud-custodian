@@ -22,11 +22,15 @@ from botocore.exceptions import ClientError
 from concurrent.futures import as_completed
 
 from c7n.actions import ActionRegistry, BaseAction, ModifyVpcSecurityGroupsAction
+from c7n.exceptions import PolicyValidationError
 from c7n.filters import (
-    FilterRegistry, ValueFilter, DefaultVpcBase, AgeFilter, OPERATORS)
+    FilterRegistry, ValueFilter, DefaultVpcBase, AgeFilter,
+    CrossAccountAccessFilter)
 import c7n.filters.vpc as net_filters
+from c7n.filters.kms import KmsRelatedFilter
 
 from c7n.manager import resources
+from c7n.resolver import ValuesFrom
 from c7n.query import QueryResourceManager
 from c7n import tags
 from c7n.utils import (
@@ -78,7 +82,7 @@ class DefaultVpc(DefaultVpcBase):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-default-vpc
@@ -131,7 +135,7 @@ class Parameter(ValueFilter):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-no-ssl
@@ -182,6 +186,28 @@ class Parameter(ValueFilter):
         return self.match(params)
 
 
+@filters.register('kms-key')
+class KmsFilter(KmsRelatedFilter):
+    """
+    Filter a resource by its associcated kms key and optionally the aliasname
+    of the kms key by using 'c7n:AliasName'
+
+    :example:
+
+        .. code-block:: yaml
+
+            policies:
+                - name: redshift-kms-key-filters
+                  resource: redshift
+                  filters:
+                    - type: kms-key
+                      key: c7n:AliasName
+                      value: "^(alias/aws/)"
+                      op: regex
+    """
+    RelatedIdsExpression = 'KmsKeyId'
+
+
 @actions.register('delete')
 class Delete(BaseAction):
     """Action to delete a redshift cluster
@@ -191,7 +217,7 @@ class Delete(BaseAction):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-no-ssl
@@ -249,7 +275,7 @@ class RetentionWindow(BaseAction):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-snapshot-retention
@@ -306,7 +332,7 @@ class Snapshot(BaseAction):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-snapshot
@@ -324,12 +350,13 @@ class Snapshot(BaseAction):
     permissions = ('redshift:CreateClusterSnapshot',)
 
     def process(self, clusters):
-        with self.executor_factory(max_workers=3) as w:
+        client = local_session(self.manager.session_factory).client('redshift')
+        with self.executor_factory(max_workers=2) as w:
             futures = []
             for cluster in clusters:
                 futures.append(w.submit(
                     self.process_cluster_snapshot,
-                    cluster))
+                    client, cluster))
             for f in as_completed(futures):
                 if f.exception():
                     self.log.error(
@@ -337,25 +364,25 @@ class Snapshot(BaseAction):
                         f.exception())
         return clusters
 
-    def process_cluster_snapshot(self, cluster):
-        c = local_session(self.manager.session_factory).client('redshift')
+    def process_cluster_snapshot(self, client, cluster):
         cluster_tags = cluster.get('Tags')
-        c.create_cluster_snapshot(
+        client.create_cluster_snapshot(
             SnapshotIdentifier=snapshot_identifier(
                 'Backup',
                 cluster['ClusterIdentifier']),
-            ClusterIdentifier=cluster['ClusterIdentifier'],Tags=cluster_tags)
+            ClusterIdentifier=cluster['ClusterIdentifier'],
+            Tags=cluster_tags)
 
 
 @actions.register('enable-vpc-routing')
 class EnhancedVpcRoutine(BaseAction):
     """Action to enable enhanced vpc routing on a redshift cluster
 
-    More: https://goo.gl/espcOF
+    More: https://docs.aws.amazon.com/redshift/latest/mgmt/enhanced-vpc-routing.html
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-enable-enhanced-routing
@@ -400,13 +427,54 @@ class EnhancedVpcRoutine(BaseAction):
                 EnhancedVpcRouting=new_routing)
 
 
+@actions.register('set-public-access')
+class RedshiftSetPublicAccess(BaseAction):
+    """
+    Action to set the 'PubliclyAccessible' setting on a redshift cluster
+
+    :example:
+
+    .. code-block:: yaml
+
+            policies:
+                - name: redshift-set-public-access
+                  resource: redshift
+                  filters:
+                    - PubliclyAccessible: true
+                  actions:
+                    - type: set-public-access
+                      state: false
+    """
+
+    schema = type_schema(
+        'set-public-access',
+        state={'type': 'boolean'})
+    permissions = ('redshift:ModifyCluster',)
+
+    def set_access(self, c):
+        client = local_session(self.manager.session_factory).client('redshift')
+        client.modify_cluster(
+            ClusterIdentifier=c['ClusterIdentifier'],
+            PubliclyAccessible=self.data.get('state', False))
+
+    def process(self, clusters):
+        with self.executor_factory(max_workers=2) as w:
+            futures = {w.submit(self.set_access, c): c for c in clusters}
+            for f in as_completed(futures):
+                if f.exception():
+                    self.log.error(
+                        "Exception setting Redshift public access on %s  \n %s",
+                        futures[f]['ClusterIdentifier'], f.exception())
+        return clusters
+
+
 @actions.register('mark-for-op')
 class TagDelayedAction(tags.TagDelayedAction):
     """Action to create an action to be performed at a later time
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-terminate-unencrypted
@@ -425,15 +493,6 @@ class TagDelayedAction(tags.TagDelayedAction):
                     msg: "Unencrypted Redshift cluster: {op}@{action_date}"
     """
 
-    schema = type_schema('mark-for-op', rinherit=tags.TagDelayedAction.schema)
-    permissions = ('redshift.CreateTags',)
-
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('redshift')
-        for r in resources:
-            arn = self.manager.generate_arn(r['ClusterIdentifier'])
-            client.create_tags(ResourceName=arn, Tags=tags)
-
 
 @actions.register('tag')
 class Tag(tags.Tag):
@@ -441,7 +500,7 @@ class Tag(tags.Tag):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-tag
@@ -458,11 +517,9 @@ class Tag(tags.Tag):
     batch_size = 5
     permissions = ('redshift:CreateTags',)
 
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('redshift')
-        for r in resources:
-            arn = self.manager.generate_arn(r['ClusterIdentifer'])
-            client.create_tags(ResourceName=arn, Tags=tags)
+    def process_resource_set(self, client, resources, tags):
+        for rarn, r in zip(self.manager.get_arns(resources), resources):
+            client.create_tags(ResourceName=rarn, Tags=tags)
 
 
 @actions.register('unmark')
@@ -472,7 +529,7 @@ class RemoveTag(tags.RemoveTag):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-remove-tag
@@ -488,11 +545,9 @@ class RemoveTag(tags.RemoveTag):
     batch_size = 5
     permissions = ('redshift:DeleteTags',)
 
-    def process_resource_set(self, resources, tag_keys):
-        client = local_session(self.manager.session_factory).client('redshift')
-        for r in resources:
-            arn = self.manager.generate_arn(r['ClusterIdentifier'])
-            client.delete_tags(ResourceName=arn, TagKeys=tag_keys)
+    def process_resource_set(self, client, resources, tag_keys):
+        for rarn, r in zip(self.manager.get_arns(resources), resources):
+            client.delete_tags(ResourceName=rarn, TagKeys=tag_keys)
 
 
 @actions.register('tag-trim')
@@ -504,14 +559,16 @@ class TagTrim(tags.TagTrim):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-tag-trim
                 resource: redshift
                 filters:
-                  - type: tag-count
-                    count: 10
+                  - type: value
+                    key: "length(Tags)"
+                    op: ge
+                    value: 10
                 actions:
                   - type: tag-trim
                     space: 1
@@ -523,8 +580,7 @@ class TagTrim(tags.TagTrim):
     max_tag_count = 10
     permissions = ('redshift:DeleteTags',)
 
-    def process_tag_removal(self, resource, candidates):
-        client = local_session(self.manager.session_factory).client('redshift')
+    def process_tag_removal(self, client, resource, candidates):
         arn = self.manager.generate_arn(resource['DBInstanceIdentifier'])
         client.delete_tags(ResourceName=arn, TagKeys=candidates)
 
@@ -587,8 +643,9 @@ class RedshiftModifyVpcSecurityGroups(ModifyVpcSecurityGroupsAction):
 
     def process(self, clusters):
         client = local_session(self.manager.session_factory).client('redshift')
-        groups = super(RedshiftModifyVpcSecurityGroups, self).get_groups(
-            clusters, metadata_key='VpcSecurityGroupId')
+        groups = super(
+            RedshiftModifyVpcSecurityGroups, self).get_groups(clusters)
+
         for idx, c in enumerate(clusters):
             client.modify_cluster(
                 ClusterIdentifier=c['ClusterIdentifier'],
@@ -601,7 +658,7 @@ class RedshiftSnapshotAge(AgeFilter):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-old-snapshots
@@ -614,9 +671,33 @@ class RedshiftSnapshotAge(AgeFilter):
 
     schema = type_schema(
         'age', days={'type': 'number'},
-        op={'type': 'string', 'enum': list(OPERATORS.keys())})
+        op={'$ref': '#/definitions/filters_common/comparison_operators'})
 
     date_attribute = 'SnapshotCreateTime'
+
+
+@RedshiftSnapshot.filter_registry.register('cross-account')
+class RedshiftSnapshotCrossAccount(CrossAccountAccessFilter):
+    """Filter all accounts that allow access to non-whitelisted accounts
+    """
+    permissions = ('redshift:DescribeClusterSnapshots',)
+    schema = type_schema(
+        'cross-account',
+        whitelist={'type': 'array', 'items': {'type': 'string'}},
+        whitelist_from=ValuesFrom.schema)
+
+    def process(self, snapshots, event=None):
+        accounts = self.get_accounts()
+        snapshots = [s for s in snapshots if s.get('AccountsWithRestoreAccess')]
+        results = []
+        for s in snapshots:
+            s_accounts = {a.get('AccountId') for a in s[
+                'AccountsWithRestoreAccess']}
+            delta_accounts = s_accounts.difference(accounts)
+            if delta_accounts:
+                s['c7n:CrossAccountViolations'] = list(delta_accounts)
+                results.append(s)
+        return results
 
 
 @RedshiftSnapshot.action_registry.register('delete')
@@ -625,7 +706,7 @@ class RedshiftSnapshotDelete(BaseAction):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-delete-old-snapshots
@@ -669,7 +750,7 @@ class RedshiftSnapshotTagDelayedAction(tags.TagDelayedAction):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-snapshot-expiring
@@ -687,16 +768,6 @@ class RedshiftSnapshotTagDelayedAction(tags.TagDelayedAction):
                     days: 7
     """
 
-    schema = type_schema('mark-for-op', rinherit=tags.TagDelayedAction.schema)
-    permissions = ('redshift:CreateTags',)
-
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('redshift')
-        for r in resources:
-            arn = self.manager.generate_arn(
-                r['ClusterIdentifier'] + '/' + r['SnapshotIdentifier'])
-            client.create_tags(ResourceName=arn, Tags=tags)
-
 
 @RedshiftSnapshot.action_registry.register('tag')
 class RedshiftSnapshotTag(tags.Tag):
@@ -704,7 +775,7 @@ class RedshiftSnapshotTag(tags.Tag):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-required-tags
@@ -721,10 +792,10 @@ class RedshiftSnapshotTag(tags.Tag):
     batch_size = 5
     permissions = ('redshift:CreateTags',)
 
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('redshift')
+    def process_resource_set(self, client, resources, tags):
         for r in resources:
-            arn = self.manager.generate_arn(r['SnapshotIdentifier'])
+            arn = self.manager.generate_arn(
+                r['ClusterIdentifier'] + '/' + r['SnapshotIdentifier'])
             client.create_tags(ResourceName=arn, Tags=tags)
 
 
@@ -735,7 +806,7 @@ class RedshiftSnapshotRemoveTag(tags.RemoveTag):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: redshift-remove-tags
@@ -751,8 +822,67 @@ class RedshiftSnapshotRemoveTag(tags.RemoveTag):
     batch_size = 5
     permissions = ('redshift:DeleteTags',)
 
-    def process_resource_set(self, resources, tag_keys):
-        client = local_session(self.manager.session_factory).client('redshift')
+    def process_resource_set(self, client, resources, tag_keys):
         for r in resources:
-            arn = self.manager.generate_arn(r['SnapshotIdentifier'])
+            arn = self.manager.generate_arn(
+                r['ClusterIdentifier'] + '/' + r['SnapshotIdentifier'])
             client.delete_tags(ResourceName=arn, TagKeys=tag_keys)
+
+
+@RedshiftSnapshot.action_registry.register('revoke-access')
+class RedshiftSnapshotRevokeAccess(BaseAction):
+    """Revokes ability of accounts to restore a snapshot
+
+    :example:
+
+        .. code-block: yaml
+
+            policies:
+              - name: redshift-snapshot-revoke-access
+                resource: redshift-snapshot
+                filters:
+                  - type: cross-account
+                    whitelist:
+                      - 012345678910
+                actions:
+                  - type: revoke-access
+    """
+    permissions = ('redshift:RevokeSnapshotAccess',)
+    schema = type_schema('revoke-access')
+
+    def validate(self):
+        for f in self.manager.iter_filters():
+            if isinstance(f, RedshiftSnapshotCrossAccount):
+                return self
+        raise PolicyValidationError(
+            '`revoke-access` may only be used in '
+            'conjunction with `cross-account` filter on %s' % (self.manager.data,))
+
+    def process_snapshot_set(self, client, snapshot_set):
+        for s in snapshot_set:
+            for a in s.get('c7n:CrossAccountViolations', []):
+                try:
+                    self.manager.retry(
+                        client.revoke_snapshot_access,
+                        SnapshotIdentifier=s['SnapshotIdentifier'],
+                        AccountWithRestoreAccess=a)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == 'ClusterSnapshotNotFound':
+                        continue
+                    raise
+
+    def process(self, snapshots):
+        client = local_session(self.manager.session_factory).client('redshift')
+        with self.executor_factory(max_workers=2) as w:
+            futures = {}
+            for snapshot_set in chunks(snapshots, 25):
+                futures[w.submit(
+                    self.process_snapshot_set, client, snapshot_set)
+                ] = snapshot_set
+            for f in as_completed(futures):
+                if f.exception():
+                    self.log.exception(
+                        'Exception while revoking access on %s: %s' % (
+                            ', '.join(
+                                [s['SnapshotIdentifier'] for s in futures[f]]),
+                            f.exception()))

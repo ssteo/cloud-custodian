@@ -20,8 +20,10 @@ import unittest
 import six
 from c7n_mailer.email_delivery import EmailDelivery
 from common import logger, get_ldap_lookup
-from common import MAILER_CONFIG, RESOURCE_1, SQS_MESSAGE_1
+from common import MAILER_CONFIG, RESOURCE_1, SQS_MESSAGE_1, SQS_MESSAGE_4
 from mock import patch, call
+
+from c7n_mailer.utils_email import is_email
 
 # note principalId is very org/domain specific for federated?, it would be good to get
 # confirmation from capone on this event / test.
@@ -50,14 +52,37 @@ class EmailTest(unittest.TestCase):
         self.aws_session = boto3.Session()
         self.email_delivery = MockEmailDelivery(MAILER_CONFIG, self.aws_session, logger)
         self.email_delivery.ldap_lookup.uid_regex = ''
-        tests_dir = '/tools/c7n_mailer/tests/'
-        template_abs_filename = '%s%sexample.jinja' % (os.path.abspath(os.curdir), tests_dir)
+        template_abs_filename = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                             'example.jinja')
+
+        # Jinja paths must always be forward slashes regardless of operating system
+        template_abs_filename = template_abs_filename.replace('\\', '/')
+
         SQS_MESSAGE_1['action']['template'] = template_abs_filename
+        SQS_MESSAGE_4['action']['template'] = template_abs_filename
 
     def test_valid_email(self):
-        self.assertFalse(self.email_delivery.target_is_email('foobar'))
-        self.assertFalse(self.email_delivery.target_is_email('foo@bar'))
-        self.assertTrue(self.email_delivery.target_is_email('foo@bar.com'))
+        self.assertFalse(is_email('foobar'))
+        self.assertFalse(is_email('foo@bar'))
+        self.assertFalse(is_email('slack://foo@bar.com'))
+        self.assertTrue(is_email('foo@bar.com'))
+
+    def test_smtp_creds(self):
+        conf = dict(MAILER_CONFIG)
+        conf['smtp_username'] = 'alice'
+        conf['smtp_password'] = 'bob'
+
+        msg = dict(SQS_MESSAGE_1)
+        deliver = MockEmailDelivery(conf, self.aws_session, logger)
+        messages_map = deliver.get_to_addrs_email_messages_map(msg)
+
+        with patch("smtplib.SMTP") as mock_smtp:
+            with patch('c7n_mailer.email_delivery.kms_decrypt') as mock_decrypt:
+                mock_decrypt.return_value = 'xyz'
+                for email_addrs, mimetext_msg in messages_map.items():
+                    deliver.send_c7n_email(msg, list(email_addrs), mimetext_msg)
+            mock_decrypt.assert_called_once()
+            mock_smtp.assert_has_calls([call().login('alice', 'xyz')])
 
     def test_priority_header_is_valid(self):
         self.assertFalse(self.email_delivery.priority_header_is_valid('0'))
@@ -80,8 +105,6 @@ class EmailTest(unittest.TestCase):
 
     def test_event_owner_ldap_flow(self):
         targets = ['event-owner']
-        username = self.email_delivery.get_aws_username_from_event(CLOUDTRAIL_EVENT)
-        self.assertEqual(username, 'michael_bolton')
         michael_bolton_email = self.email_delivery.get_event_owner_email(targets, CLOUDTRAIL_EVENT)
         self.assertEqual(michael_bolton_email, ['michael_bolton@initech.com'])
 
@@ -127,7 +150,8 @@ class EmailTest(unittest.TestCase):
         with patch("smtplib.SMTP") as mock_smtp:
             for email_addrs, mimetext_msg in six.iteritems(to_addrs_to_email_messages_map):
                 self.email_delivery.send_c7n_email(SQS_MESSAGE, list(email_addrs), mimetext_msg)
-                self.assertEqual(mimetext_msg['X-Priority'], '1')
+
+                self.assertEqual(mimetext_msg['X-Priority'], '1 (Highest)')
             # Get instance of mocked SMTP object
             smtp_instance = mock_smtp.return_value
             # Checks the mock has been called at least one time
@@ -195,6 +219,32 @@ class EmailTest(unittest.TestCase):
         self.assertEqual(emails_to_resources_map[email_1_to_addrs], [RESOURCE_1])
         self.assertEqual(emails_to_resources_map[email_2_to_addrs], [RESOURCE_2])
 
+    def test_emails_resource_mapping_no_owner(self):
+        SQS_MESSAGE = copy.deepcopy(SQS_MESSAGE_1)
+        SQS_MESSAGE['action'].pop('priority_header', None)
+        SQS_MESSAGE['action']['owner_absent_contact'] = ['foo@example.com']
+        RESOURCE_2 = {
+            'AvailabilityZone': 'us-east-1a',
+            'Attachments': [],
+            'Tags': [
+                {
+                    'Value': 'peter',
+                    'Key': 'CreatorName'
+                }
+            ],
+            'VolumeId': 'vol-01a0e6ea6b89f0099'
+        }
+        SQS_MESSAGE['resources'] = [RESOURCE_2]
+        emails_to_resources_map = self.email_delivery.get_email_to_addrs_to_resources_map(
+            SQS_MESSAGE
+        )
+        email_1_to_addrs = (
+            'bill_lumberg@initech.com', 'foo@example.com', 'peter@initech.com'
+        )
+        self.assertEqual(
+            emails_to_resources_map[email_1_to_addrs], [RESOURCE_2]
+        )
+
     def test_no_mapping_if_no_valid_emails(self):
         SQS_MESSAGE = copy.deepcopy(SQS_MESSAGE_1)
         SQS_MESSAGE['action']['to'].remove('ldap_uid_tags')
@@ -203,3 +253,46 @@ class EmailTest(unittest.TestCase):
             SQS_MESSAGE
         )
         self.assertEqual(emails_to_resources_map, {})
+
+    def test_flattened_list_get_resource_owner_emails_from_resource(self):
+        RESOURCE_2 = {
+            'AvailabilityZone': 'us-east-1a',
+            'Attachments': [],
+            'Tags': [
+                {
+                    'Value': '123456',
+                    'Key': 'OwnerEmail'
+                }
+            ],
+            'VolumeId': 'vol-01a0e6ea6b8lsdkj93'
+        }
+        RESOURCE_3 = {
+            'AvailabilityZone': 'us-east-1a',
+            'Attachments': [],
+            'Tags': [
+                {
+                    'Value': 'milton@initech.com',
+                    'Key': 'OwnerEmail'
+                }
+            ],
+            'VolumeId': 'vol-01a0e6ea6b8lsdkj93'
+        }
+
+        ldap_emails = self.email_delivery.get_resource_owner_emails_from_resource(
+            SQS_MESSAGE_1,
+            RESOURCE_2
+        )
+
+        self.assertEqual(ldap_emails, ['milton@initech.com'])
+
+        ldap_emails = self.email_delivery.get_resource_owner_emails_from_resource(
+            SQS_MESSAGE_1,
+            RESOURCE_3
+        )
+
+        self.assertEqual(ldap_emails, ['milton@initech.com'])
+
+    def test_cc_email_functionality(self):
+        email = self.email_delivery.get_mimetext_message(
+            SQS_MESSAGE_4, SQS_MESSAGE_4['resources'], ['hello@example.com'])
+        self.assertEqual(email['Cc'], 'hello@example.com, cc@example.com')

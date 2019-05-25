@@ -12,33 +12,28 @@ Unit tests can be run with:
 
    $ tox
 
-Coverage reports can be generated and viewed with the following:
+Linting can be run with:
 
 .. code-block:: bash
 
-   (py27) $ make coverage
+  $ make lint
 
-   # Open the reports in a browser
+Operating System Compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   # on osx
-   $ open coverage/index.html
+Tests are currently executed on both Ubuntu 1604 and Windows Server 2019
+and must pass on both operating systems.
 
-   # on gnomeish linux
-   $ gnome-open coverage/index.html
+Both Windows and Linux sample dockerfiles are provided for running Tox which may help you.
+You can find these in `tools/dev`.
+
+In Docker for Windows you can run both of these containers,
+`even simultaneously <https://docs.microsoft.com/en-us/virtualization/windowscontainers/deploy-containers/linux-containers>`_.
 
 
-Ratcheting down Python 3.6 Tests
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-We are in the process of porting Custodian to run on both Python 3.6 in
-addition to 2.7. As part of this process, we record tests that are known to
-fail under Python 3.6 in a file called ``ratchet.txt``, and we require these
-and only these tests to fail under the ``py36`` environment during continuous
-integration. If you make changes that fix some failing tests under Python 3.6,
-then the ``py36`` test environment will remove the newly pasing tests from the
-``ratchet.txt`` file and will fail with a message prompting you to commit the
-changes to ``ratchet.txt``.
-
+If you need access to Windows you can download a
+`virtual machine <https://developer.microsoft.com/en-us/windows/downloads/virtual-machines>`_
+directly from Microsoft for any hypervisor.
 
 Decorating tests
 ~~~~~~~~~~~~~~~~
@@ -46,8 +41,18 @@ Decorating tests
 The ``functional`` decorator marks tests that don't require any pre-existing
 AWS context, and can therefore be run cleanly against live AWS.
 
-Writing Placebo Tests
-~~~~~~~~~~~~~~~~~~~~~
+To run only the tests decorated by ``functional``:
+
+.. code-block::
+
+    (py37)$ pytest tests/test_vpc.py -x -m functional
+
+Writing Placebo Tests for AWS Resources
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Note: These instructions are only for recording data in AWS. For Azure, GCP, or
+other cloud providers, see the corresponding documentation for information on how
+to record data there.
 
 The `Placebo <http://placebo.readthedocs.io/en/latest/>`_ library is used to
 record and replay AWS responses so that tests can run locally, and in a fraction
@@ -119,3 +124,16 @@ When the test is completed, change to using `replay_flight_data`:
 Now when the test is run it will use the data previously recorded and will not
 contact AWS.  When committing your test, don't forget to include the 
 `tests/data/placebo/test_example` directory!
+
+Note: if it's necessary to delay CLI calls due to delays in the time it takes
+for an attribute on a resource to be reflected in an API call or any other reason,
+use ``self.recording`` to only sleep when recording json like so:
+
+  .. code-block:: python
+
+    import time
+
+    ...
+
+    if self.recording:
+      time.sleep(10)

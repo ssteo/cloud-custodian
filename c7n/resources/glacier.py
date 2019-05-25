@@ -34,7 +34,7 @@ class Glacier(QueryResourceManager):
         service = 'glacier'
         enum_spec = ('list_vaults', 'VaultList', None)
         name = "VaultName"
-        id = "VaultARN"
+        arn = id = "VaultARN"
         filter_name = None
         dimension = None
         universal_taggable = True
@@ -104,11 +104,11 @@ class RemovePolicyStatement(RemovePolicyBase):
 
     :example:
 
-        .. code-block: yaml
+    .. code-block:: yaml
 
             policies:
               - name: glacier-cross-account
-                resource: glaier
+                resource: glacier
                 filters:
                   - type: cross-account
                 actions:
@@ -124,7 +124,7 @@ class RemovePolicyStatement(RemovePolicyBase):
         for r in resources:
             try:
                 results += filter(None, [self.process_resource(client, r)])
-            except:
+            except Exception:
                 self.log.exception(
                     "Error processing glacier:%s", r['VaultARN'])
         return results
@@ -155,9 +155,7 @@ class RemovePolicyStatement(RemovePolicyBase):
         else:
             client.set_vault_access_policy(
                 vaultName=resource['VaultName'],
-                policy={
-                    'Policy':json.dumps(p)
-                }
+                policy={'Policy': json.dumps(p)}
             )
         return {'Name': resource['VaultName'],
                 'State': 'PolicyRemoved',

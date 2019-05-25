@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import argparse
-from cStringIO import StringIO
 from dateutil.parser import parse
 from functools import partial
 from gzip import GzipFile
@@ -21,13 +20,16 @@ import json
 import logging
 import math
 from multiprocessing import cpu_count, Pool
-from c7n.credentials import assumed_session, SessionFactory
+from c7n.credentials import SessionFactory
 import os
 import tempfile
 import time
 import sqlite3
 
-import boto3
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from io import BytesIO as StringIO
 
 from botocore.client import Config
 
@@ -35,6 +37,7 @@ from botocore.client import Config
 log = logging.getLogger('c7n_traildb')
 
 options = None
+
 
 def dump(o):
     return json.dumps(o)
@@ -203,7 +206,7 @@ def process_records(records,
         if not user_records:
             return
         # Spool to temporary files to get out of mem
-        fh = tempfile.NamedTemporaryFile(dir=data_dir, delete=False)
+        fh = tempfile.NamedTemporaryFile(dir=data_dir, delete=False, mode='w')
         fh.write(dump(user_records))
         fh.flush()
         fh.close()
@@ -269,7 +272,7 @@ def process_bucket(
                 os.remove(fpath)
             db.flush()
 
-        l = t
+        l = t # NOQA
         t = time.time()
 
         log.info("Stored page time:%0.2fs", t - st)
@@ -325,6 +328,7 @@ def setup_parser():
 def main():
     logging.basicConfig(level=logging.DEBUG)
     logging.getLogger('botocore').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
     global options
     parser = setup_parser()
     options = parser.parse_args()
