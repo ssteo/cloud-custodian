@@ -1,18 +1,6 @@
 # Copyright 2015-2017 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from __future__ import absolute_import, division, print_function, unicode_literals
-
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 from botocore.exceptions import ClientError
 
 from c7n.actions import BaseAction
@@ -52,15 +40,15 @@ def ecs_taggable(model, r):
 @resources.register('ecs')
 class ECSCluster(query.QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ecs'
         enum_spec = ('list_clusters', 'clusterArns', None)
         batch_detail_spec = (
             'describe_clusters', 'clusters', None, 'clusters', {'include': ['TAGS']})
         name = "clusterName"
         arn = id = "clusterArn"
-        dimension = None
-        filter_name = None
+        arn_type = 'cluster'
+        cfn_type = 'AWS::ECS::Cluster'
 
     def augment(self, resources):
         resources = super(ECSCluster, self).augment(resources)
@@ -160,15 +148,14 @@ class Service(query.ChildResourceManager):
 
     chunk_size = 10
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ecs'
         name = 'serviceName'
         arn = id = 'serviceArn'
         enum_spec = ('list_services', 'serviceArns', None)
         parent_spec = ('ecs', 'cluster', None)
-        dimension = None
         supports_trailevents = True
-        filter_name = None
+        cfn_type = 'AWS::ECS::Service'
 
     @property
     def source_type(self):
@@ -193,6 +180,7 @@ class ServiceMetrics(MetricsFilter):
 class RelatedTaskDefinitionFilter(ValueFilter):
 
     schema = type_schema('task-definition', rinherit=ValueFilter.schema)
+    schema_alias = False
     permissions = ('ecs:DescribeTaskDefinition',
                    'ecs:ListTaskDefinitions')
     related_key = 'taskDefinition'
@@ -234,7 +222,7 @@ class ServiceTaskDefinitionFilter(RelatedTaskDefinitionFilter):
     .. code-block:: yaml
 
        policies:
-         - name: fargate-readonly-tasks
+         - name: fargate-find-stop-image
            resource: ecs-task
            filters:
              - launchType: FARGATE
@@ -390,14 +378,14 @@ class Task(query.ChildResourceManager):
 
     chunk_size = 100
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ecs'
         arn = id = name = 'taskArn'
+        arn_type = 'task'
         enum_spec = ('list_tasks', 'taskArns', None)
         parent_spec = ('ecs', 'cluster', None)
-        dimension = None
         supports_trailevents = True
-        filter_name = None
+        cfn_type = 'AWS::ECS::TaskSet'
 
     @property
     def source_type(self):
@@ -465,13 +453,12 @@ class StopTask(BaseAction):
 @resources.register('ecs-task-definition')
 class TaskDefinition(query.QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ecs'
         arn = id = name = 'taskDefinitionArn'
         enum_spec = ('list_task_definitions', 'taskDefinitionArns', None)
-        dimension = None
-        filter_name = None
-        filter_type = None
+        cfn_type = 'AWS::ECS::TaskDefinition'
+        arn_type = 'task-definition'
 
     def get_resources(self, ids, cache=True):
         if cache:
@@ -489,7 +476,8 @@ class TaskDefinition(query.QueryResourceManager):
         results = []
         client = local_session(self.session_factory).client('ecs')
         for task_def_set in resources:
-            response = client.describe_task_definition(
+            response = self.retry(
+                client.describe_task_definition,
                 taskDefinition=task_def_set,
                 include=['TAGS'])
             r = response['taskDefinition']
@@ -531,12 +519,11 @@ class ContainerInstance(query.ChildResourceManager):
 
     chunk_size = 100
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ecs'
-        id = name = 'containerInstance'
+        id = name = 'containerInstanceArn'
         enum_spec = ('list_container_instances', 'containerInstanceArns', None)
         parent_spec = ('ecs', 'cluster', None)
-        dimension = None
         arn = "containerInstanceArn"
 
     @property

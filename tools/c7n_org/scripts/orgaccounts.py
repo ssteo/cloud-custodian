@@ -1,23 +1,11 @@
 # Copyright 2018 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from __future__ import print_function
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 
 import click
-import yaml
 import os
 from c7n.credentials import assumed_session, SessionFactory
+from c7n.utils import yaml_dump
 
 ROLE_TEMPLATE = "arn:aws:iam::{Id}:role/OrganizationAccountAccessRole"
 
@@ -37,7 +25,9 @@ ROLE_TEMPLATE = "arn:aws:iam::{Id}:role/OrganizationAccountAccessRole"
     '-f', '--output', type=click.File('w'),
     help="File to store the generated config (default stdout)")
 @click.option('-a', '--active', default=False, help="Get only active accounts", type=click.BOOL)
-def main(role, ou, assume, profile, output, regions, active):
+@click.option('-i', '--ignore', multiple=True,
+  help="list of accounts that won't be added to the config file")
+def main(role, ou, assume, profile, output, regions, active, ignore):
     """Generate a c7n-org accounts config file using AWS Organizations
 
     With c7n-org you can then run policies or arbitrary scripts across
@@ -49,7 +39,7 @@ def main(role, ou, assume, profile, output, regions, active):
     accounts = []
     for path in ou:
         ou = get_ou_from_path(client, path)
-        accounts.extend(get_accounts_for_ou(client, ou, active))
+        accounts.extend(get_accounts_for_ou(client, ou, active, ignoredAccounts=ignore))
 
     results = []
     for a in accounts:
@@ -58,21 +48,24 @@ def main(role, ou, assume, profile, output, regions, active):
         for idx, _ in enumerate(path_parts):
             tags.append("path:/%s" % "/".join(path_parts[:idx + 1]))
 
+        for tag in list_tags_for_account(client, a['Id']):
+            tags.append("{}:{}".format(tag.get('Key'), tag.get('Value')))
+
+        if not role.startswith('arn'):
+            arn_role = "arn:aws:iam::{}:role/{}".format(a['Id'], role)
+        else:
+            arn_role = role.format(**a)
         ainfo = {
             'account_id': a['Id'],
             'email': a['Email'],
             'name': a['Name'],
             'tags': tags,
-            'role': role.format(**a)}
+            'role': arn_role}
         if regions:
-            ainfo['regions'] = regions
+            ainfo['regions'] = list(regions)
         results.append(ainfo)
 
-    print(
-        yaml.safe_dump(
-            {'accounts': results},
-            default_flow_style=False),
-        file=output)
+    print(yaml_dump({'accounts': results}), file=output)
 
 
 def get_session(role, session_name, profile):
@@ -120,7 +113,7 @@ def get_sub_ous(client, ou):
     return results
 
 
-def get_accounts_for_ou(client, ou, active, recursive=True):
+def get_accounts_for_ou(client, ou, active, recursive=True, ignoredAccounts=()):
     results = []
     ous = [ou]
     if recursive:
@@ -132,11 +125,26 @@ def get_accounts_for_ou(client, ou, active, recursive=True):
             ParentId=ou['Id']).build_full_result().get(
                 'Accounts', []):
             a['Path'] = ou['Path']
+
+            if a['Id'] in ignoredAccounts:
+                continue
+
             if active:
                 if a['Status'] == 'ACTIVE':
                     results.append(a)
             else:
                 results.append(a)
+    return results
+
+
+def list_tags_for_account(client, id):
+    results = []
+
+    tags_pager = client.get_paginator('list_tags_for_resource')
+    for tag in tags_pager.paginate(
+        ResourceId=id).build_full_result().get(
+            'Tags', []):
+        results.append(tag)
     return results
 
 

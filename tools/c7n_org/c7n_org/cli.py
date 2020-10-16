@@ -1,25 +1,15 @@
 # Copyright 2017 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 """Run a custodian policy across an organization's accounts
 """
 
+import csv
 from collections import Counter
 import logging
 import os
 import time
 import subprocess
-import six
 import sys
 
 import multiprocessing
@@ -38,13 +28,12 @@ from c7n.credentials import assumed_session, SessionFactory
 from c7n.executor import MainThreadExecutor
 from c7n.config import Config
 from c7n.policy import PolicyCollection
+from c7n.provider import get_resource_class
 from c7n.reports.csvout import Formatter, fs_record_set
-from c7n.resources import load_resources
-from c7n.manager import resources as resource_registry
+from c7n.resources import load_available
 from c7n.utils import CONN_CACHE, dumps
 
 from c7n_org.utils import environ, account_tags
-from c7n.utils import UnicodeWriter
 
 log = logging.getLogger('c7n_org')
 
@@ -61,7 +50,7 @@ WORKER_COUNT = int(
 
 
 CONFIG_SCHEMA = {
-    '$schema': 'http://json-schema.org/schema#',
+    '$schema': 'http://json-schema.org/draft-07/schema',
     'id': 'http://schema.cloudcustodian.io/v0/orgrunner.json',
     'definitions': {
         'account': {
@@ -74,7 +63,10 @@ CONFIG_SCHEMA = {
             'properties': {
                 'name': {'type': 'string'},
                 'email': {'type': 'string'},
-                'account_id': {'type': 'string'},
+                'account_id': {
+                    'type': 'string',
+                    'pattern': '^[0-9]{12}$',
+                    'minLength': 12, 'maxLength': 12},
                 'profile': {'type': 'string', 'minLength': 3},
                 'tags': {'type': 'array', 'items': {'type': 'string'}},
                 'regions': {'type': 'array', 'items': {'type': 'string'}},
@@ -138,7 +130,7 @@ def cli():
     """custodian organization multi-account runner."""
 
 
-class LogFilter(object):
+class LogFilter:
     """We want to keep the main c7n-org cli output to be readable.
 
     We previously did so via squelching custodian's log output via
@@ -191,7 +183,7 @@ def init(config, use, debug, verbose, accounts, tags, policies, resource=None, p
     filter_policies(custodian_config, policy_tags, policies, resource)
     filter_accounts(accounts_config, tags, accounts)
 
-    load_resources()
+    load_available()
     MainThreadExecutor.c7n_async = False
     executor = debug and MainThreadExecutor or ProcessPoolExecutor
     return accounts_config, custodian_config, executor
@@ -209,7 +201,7 @@ def resolve_regions(regions):
 def get_session(account, session_name, region):
     if account.get('role'):
         roles = account['role']
-        if isinstance(roles, six.string_types):
+        if isinstance(roles, str):
             roles = [roles]
         s = None
         for r in roles:
@@ -236,7 +228,8 @@ def filter_accounts(accounts_config, tags, accounts, not_accounts=None):
     for a in accounts_config.get('accounts', ()):
         if not_accounts and a['name'] in not_accounts:
             continue
-        if accounts and a['name'] not in accounts:
+        account_id = a.get('account_id') or a.get('project_id') or a.get('subscription_id') or ''
+        if accounts and a['name'] not in accounts and account_id not in accounts:
             continue
         if tags:
             found = set()
@@ -273,6 +266,7 @@ def report_account(account, region, policies_config, output_path, cache_path, de
     output_path = os.path.join(output_path, account['name'], region)
     cache_path = os.path.join(cache_path, "%s-%s.cache" % (account['name'], region))
 
+    load_available()
     config = Config.empty(
         region=region,
         output_dir=output_path,
@@ -375,8 +369,8 @@ def report(config, output, use, output_dir, accounts,
     prefix_fields = OrderedDict(
         (('Account', 'account'), ('Region', 'region'), ('Policy', 'policy')))
     config = Config.empty()
-    factory = resource_registry.get(list(resource_types)[0])
 
+    factory = get_resource_class(list(resource_types)[0])
     formatter = Formatter(
         factory.resource_type,
         extra_fields=field,
@@ -386,7 +380,7 @@ def report(config, output, use, output_dir, accounts,
         fields=prefix_fields)
 
     rows = formatter.to_csv(records, unique=False)
-    writer = UnicodeWriter(output, formatter.headers())
+    writer = csv.writer(output, formatter.headers())
     writer.writerow(formatter.headers())
     writer.writerows(rows)
 
@@ -451,6 +445,8 @@ def run_script(config, output_dir, accounts, tags, region, echo, serial, script_
     if len(script_args) == 1 and " " in script_args[0]:
         script_args = script_args[0].split()
 
+    success = True
+
     with executor(max_workers=WORKER_COUNT) as w:
         futures = {}
         for a in accounts_config.get('accounts', ()):
@@ -466,6 +462,7 @@ def run_script(config, output_dir, accounts, tags, region, echo, serial, script_
                 log.warning(
                     "Error running script in %s @ %s exception: %s",
                     a['name'], r, f.exception())
+                success = False
             exit_code = f.result()
             if exit_code == 0:
                 log.info(
@@ -475,22 +472,31 @@ def run_script(config, output_dir, accounts, tags, region, echo, serial, script_
                 log.info(
                     "error running script on account:%s region:%s script: `%s`",
                     a['name'], r, " ".join(script_args))
+                success = False
+
+    if not success:
+        sys.exit(1)
 
 
 def accounts_iterator(config):
     for a in config.get('accounts', ()):
+        if isinstance(a['role'], str) and not a['role'].startswith('arn'):
+            a['role'] = "arn:aws:iam::{}:role/{}".format(
+                a['account_id'], a['role'])
         yield a
     for a in config.get('subscriptions', ()):
         d = {'account_id': a['subscription_id'],
              'name': a.get('name', a['subscription_id']),
              'regions': ['global'],
-             'tags': a.get('tags', ())}
+             'tags': a.get('tags', ()),
+             'vars': a.get('vars', {})}
         yield d
     for a in config.get('projects', ()):
         d = {'account_id': a['project_id'],
              'name': a.get('name', a['project_id']),
              'regions': ['global'],
-             'tags': a.get('tags', ())}
+             'tags': a.get('tags', ()),
+             'vars': a.get('vars', {})}
         yield d
 
 
@@ -501,6 +507,7 @@ def run_account(account, region, policies_config, output_path,
     logging.getLogger('custodian.output').setLevel(logging.ERROR + 1)
     CONN_CACHE.session = None
     CONN_CACHE.time = None
+    load_available()
 
     # allow users to specify interpolated output paths
     if '{' not in output_path:
@@ -517,7 +524,7 @@ def run_account(account, region, policies_config, output_path,
     env_vars = account_tags(account)
 
     if account.get('role'):
-        if isinstance(account['role'], six.string_types):
+        if isinstance(account['role'], str):
             config['assume_role'] = account['role']
             config['external_id'] = account.get('external_id')
         else:
@@ -534,10 +541,11 @@ def run_account(account, region, policies_config, output_path,
 
     with environ(**env_vars):
         for p in policies:
+            # Extend policy execution conditions with account information
+            p.conditions.env_vars['account'] = account
             # Variable expansion and non schema validation (not optional)
             p.expand_variables(p.get_variables(account.get('vars', {})))
             p.validate()
-
             log.debug(
                 "Running policy:%s account:%s region:%s",
                 p.name, account['name'], region)
@@ -546,6 +554,10 @@ def run_account(account, region, policies_config, output_path,
                 policy_counts[p.name] = resources and len(resources) or 0
                 if not resources:
                     continue
+                if not config.dryrun and p.execution_mode != 'pull':
+                    log.info("Ran account:%s region:%s policy:%s provisioned time:%0.2f",
+                             account['name'], region, p.name, time.time() - st)
+                    continue
                 log.info(
                     "Ran account:%s region:%s policy:%s matched:%d time:%0.2f",
                     account['name'], region, p.name, len(resources),
@@ -553,8 +565,8 @@ def run_account(account, region, policies_config, output_path,
             except ClientError as e:
                 success = False
                 if e.response['Error']['Code'] == 'AccessDenied':
-                    log.warning('Access denied account:%s region:%s',
-                                account['name'], region)
+                    log.warning('Access denied api:%s policy:%s account:%s region:%s',
+                                e.operation_name, p.name, account['name'], region)
                     return policy_counts, success
                 log.error(
                     "Exception running policy:%s account:%s region:%s error:%s",
@@ -637,6 +649,7 @@ def run(config, use, output_dir, accounts, tags, region,
                 log.warning(
                     "Error running policy in %s @ %s exception: %s",
                     a['name'], r, f.exception())
+                continue
 
             account_region_pcounts, account_region_success = f.result()
             for p in account_region_pcounts:
