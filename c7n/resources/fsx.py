@@ -1,4 +1,3 @@
-# Copyright 2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -306,43 +305,11 @@ class DeleteFileSystem(BaseAction):
 
 @FSx.filter_registry.register('kms-key')
 class KmsFilter(KmsRelatedFilter):
-    """
-    Filter a resource by its associcated kms key and optionally the aliasname
-    of the kms key by using 'c7n:AliasName'
 
-    :example:
-
-        .. code-block:: yaml
-
-            policies:
-                - name: fsx-kms-key-filters
-                  resource: fsx
-                  filters:
-                    - type: kms-key
-                      key: c7n:AliasName
-                      value: "^(alias/aws/fsx)"
-                      op: regex
-    """
     RelatedIdsExpression = 'KmsKeyId'
 
 
 @FSxBackup.filter_registry.register('kms-key')
 class KmsFilterFsxBackup(KmsRelatedFilter):
-    """
-    Filter a resource by its associcated kms key and optionally the aliasname
-    of the kms key by using 'c7n:AliasName'
 
-    :example:
-
-        .. code-block:: yaml
-
-            policies:
-                - name: fsx-backup-kms-key-filters
-                  resource: fsx-backup
-                  filters:
-                    - type: kms-key
-                      key: c7n:AliasName
-                      value: "^(alias/aws/fsx)"
-                      op: regex
-    """
     RelatedIdsExpression = 'KmsKeyId'

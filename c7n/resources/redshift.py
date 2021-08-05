@@ -1,4 +1,3 @@
-# Copyright 2016-2017 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 import json
@@ -303,23 +302,7 @@ class Parameter(ValueFilter):
 
 @Redshift.filter_registry.register('kms-key')
 class KmsFilter(KmsRelatedFilter):
-    """
-    Filter a resource by its associcated kms key and optionally the aliasname
-    of the kms key by using 'c7n:AliasName'
 
-    :example:
-
-        .. code-block:: yaml
-
-            policies:
-                - name: redshift-kms-key-filters
-                  resource: redshift
-                  filters:
-                    - type: kms-key
-                      key: c7n:AliasName
-                      value: "^(alias/aws/)"
-                      op: regex
-    """
     RelatedIdsExpression = 'KmsKeyId'
 
 

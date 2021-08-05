@@ -1,4 +1,3 @@
-# Copyright 2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 """Most tags tests within their corresponding resource tags, we use this
@@ -77,6 +76,31 @@ class UniversalTagTest(BaseTest):
             {"FailedResourcesMap": {"arn:abc": {"ErrorCode": "PermissionDenied"}}}
         ]
         self.assertRaises(Exception, universal_retry, method, ["arn:abc"])
+
+    def test_mark_for_op_deprecations(self):
+        policy = self.load_policy({
+            'name': 'dep-test',
+            'resource': 'ec2',
+            'actions': [{'type': 'mark-for-op', 'op': 'stop'}]})
+
+        self.assertDeprecation(policy, """
+            policy 'dep-test'
+              actions:
+                mark-for-op: optional fields deprecated (one of 'hours' or 'days' must be specified)
+            """)
+
+    def test_unmark_deprecations(self):
+        policy = self.load_policy({
+            'name': 'dep-test',
+            'resource': 'ec2',
+            'filters': [{'tag:foo': 'exists'}],
+            'actions': [{'type': 'unmark', 'tags': ['foo']}]})
+
+        self.assertDeprecation(policy, """
+            policy 'dep-test'
+              actions:
+                remove-tag: alias 'unmark' has been deprecated
+            """)
 
 
 class CoalesceCopyUserTags(BaseTest):

@@ -1,4 +1,3 @@
-# Copyright 2017-2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 from .common import BaseTest
@@ -6,6 +5,18 @@ import time
 
 
 class CloudHSMClusterTest(BaseTest):
+
+    def test_clouhsm_deprecated(self):
+        factory = self.replay_flight_data("test_hsm_deprecated")
+        p = self.load_policy(
+            {
+                "name": "cloudhsm",
+                "resource": "hsm"
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        assert len(resources) == 0
 
     def test_cloudhsm(self):
         factory = self.replay_flight_data("test_cloudhsm")

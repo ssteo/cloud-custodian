@@ -1,4 +1,3 @@
-# Copyright 2017 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 from .common import BaseTest
@@ -252,6 +251,19 @@ class TestModelInstance(BaseTest):
         )
         resources = p.run()
         self.assertGreaterEqual(len(resources), 1)
+
+    def test_filter_model(self):
+        session_factory = self.replay_flight_data("test_sagemaker_model_filter")
+        p = self.load_policy(
+            {
+                "name": "query-model",
+                "resource": "sagemaker-model",
+                "filters": [{"ExecutionRoleArn": "present"}],
+            },
+            session_factory=session_factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
 
     def test_delete_model(self):
         session_factory = self.replay_flight_data("test_sagemaker_delete_model")

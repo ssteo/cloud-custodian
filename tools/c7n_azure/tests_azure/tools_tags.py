@@ -1,4 +1,3 @@
-# Copyright 2019 Microsoft Corporation
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 from azure.mgmt.compute.models import VirtualMachineUpdate
@@ -54,8 +53,8 @@ def get_tags_parameter(update_tags_mock):
 
 
 def get_tags(client, rg_name, vm_name):
-    return client.virtual_machines.get(rg_name, vm_name).tags
+    return client.virtual_machines.get(rg_name, vm_name, expand=None).tags
 
 
 def set_tags(client, rg_name, vm_name, tags):
-    client.virtual_machines.update(rg_name, vm_name, VirtualMachineUpdate(tags=tags))
+    client.virtual_machines.begin_update(rg_name, vm_name, VirtualMachineUpdate(tags=tags))

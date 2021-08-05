@@ -1,4 +1,3 @@
-# Copyright 2017 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 from .common import BaseTest
@@ -71,6 +70,19 @@ class TestGlueConnections(BaseTest):
         client = session_factory().client("glue")
         connections = client.get_connections()["ConnectionList"]
         self.assertFalse(connections)
+
+    def test_connection_password_hidden(self):
+        session_factory = self.replay_flight_data("test_connection_password_hidden")
+        p = self.load_policy(
+            {
+                "name": "glue-connection",
+                "resource": "glue-connection",
+            },
+            session_factory=session_factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+        self.assertEqual('PASSWORD' in resources[0].get('ConnectionProperties'), False)
 
 
 class TestGlueDevEndpoints(BaseTest):

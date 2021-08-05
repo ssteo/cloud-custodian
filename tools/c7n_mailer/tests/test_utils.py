@@ -1,3 +1,5 @@
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 # -*- coding: utf-8 -*-
 
 import os
@@ -89,6 +91,17 @@ class ResourceFormat(unittest.TestCase):
                 {'InternetGatewayId': 'igw-x', 'Attachments': []},
                 'aws.internet-gateway'),
             'id: igw-x  attachments: 0')
+
+    def test_rds_cluster(self):
+        self.assertEqual(
+            utils.resource_format(
+                {'DBClusterIdentifier': 'database-2',
+                 'Engine': 'mysql-aurora',
+                 'EngineVersion': '5.7.mysql_aurora.2.07.2',
+                 'AllocatedStorage': '1'},
+                'rds-cluster'),
+            'database-2 mysql-aurora-5.7.mysql_aurora.2.07.2 1',
+        )
 
     def test_s3(self):
         self.assertEqual(

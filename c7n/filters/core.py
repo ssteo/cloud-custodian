@@ -1,4 +1,3 @@
-# Copyright 2015-2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 """
@@ -12,7 +11,6 @@ import ipaddress
 import logging
 import operator
 import re
-import os
 
 from dateutil.tz import tzutc
 from dateutil.parser import parse
@@ -24,7 +22,7 @@ from c7n.element import Element
 from c7n.exceptions import PolicyValidationError
 from c7n.registry import PluginRegistry
 from c7n.resolver import ValuesFrom
-from c7n.utils import set_annotation, type_schema, parse_cidr
+from c7n.utils import set_annotation, type_schema, parse_cidr, parse_date
 from c7n.manager import iter_filters
 
 
@@ -216,9 +214,10 @@ class Filter(Element):
             r[self.matched_annotation_key] = intersect_list(
                 values,
                 r.get(self.matched_annotation_key))
-
-        if not values and block_op != 'or':
-            return
+        elif block_op == 'or':
+            r[self.matched_annotation_key] = union_list(
+                values,
+                r.get(self.matched_annotation_key))
 
 
 class BaseValueFilter(Filter):
@@ -270,6 +269,16 @@ def intersect_list(a, b):
     return res
 
 
+def union_list(a, b):
+    if not b:
+        return a
+    if not a:
+        return b
+    res = a
+    res.extend(x for x in b if x not in a)
+    return res
+
+
 class BooleanGroupFilter(Filter):
 
     def __init__(self, data, registry, manager):
@@ -292,6 +301,13 @@ class BooleanGroupFilter(Filter):
 
     def __bool__(self):
         return True
+
+    def get_deprecations(self):
+        """Return any matching deprecations for the nested filters."""
+        deprecations = []
+        for f in self.filters:
+            deprecations.extend(f.get_deprecations())
+        return deprecations
 
 
 class Or(BooleanGroupFilter):
@@ -583,7 +599,7 @@ class ValueFilter(BaseValueFilter):
                 return op(r, v)
             except TypeError:
                 return False
-        elif r == self.v:
+        elif r == v:
             return True
 
         return False
@@ -724,42 +740,6 @@ class EventFilter(ValueFilter):
         if self(event):
             return resources
         return []
-
-
-def parse_date(v, tz=None):
-    if v is None:
-        return v
-
-    tz = tz or tzutc()
-
-    if isinstance(v, datetime.datetime):
-        if v.tzinfo is None:
-            return v.astimezone(tz)
-        return v
-
-    if isinstance(v, str):
-        try:
-            return parse(v).astimezone(tz)
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            pass
-
-    # OSError on windows -- https://bugs.python.org/issue36439
-    exceptions = (ValueError, OSError) if os.name == "nt" else (ValueError)
-
-    if isinstance(v, (int, float, str)):
-        try:
-            v = datetime.datetime.fromtimestamp(float(v)).astimezone(tz)
-        except exceptions:
-            pass
-
-    if isinstance(v, (int, float, str)):
-        try:
-            # try interpreting as milliseconds epoch
-            v = datetime.datetime.fromtimestamp(float(v) / 1000).astimezone(tz)
-        except exceptions:
-            pass
-
-    return isinstance(v, datetime.datetime) and v or None
 
 
 class ValueRegex:

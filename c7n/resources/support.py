@@ -1,4 +1,3 @@
-# Copyright 2015-2017 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 from c7n.manager import resources
@@ -11,6 +10,7 @@ class SupportCase(QueryResourceManager):
     class resource_type(TypeInfo):
         service = 'support'
         enum_spec = ('describe_cases', 'cases', None)
+        global_resource = True
         filter_name = 'caseIdList'
         filter_type = 'list'
         id = 'caseId'

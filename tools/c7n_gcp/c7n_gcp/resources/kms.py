@@ -1,4 +1,3 @@
-# Copyright 2019 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -89,6 +88,7 @@ class KmsCryptoKey(ChildResourceManager):
             'use_child_query': True
         }
         asset_type = "cloudkms.googleapis.com/CryptoKey"
+        scc_type = "google.cloud.kms.CryptoKey"
 
         @staticmethod
         def get(client, resource_info):

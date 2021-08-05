@@ -1,4 +1,3 @@
-# Copyright 2017-2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -337,6 +336,10 @@ class TypeInfo(metaclass=TypeMeta):
 
     # cloud asset inventory type
     asset_type = None
+
+    @classmethod
+    def get_metric_resource_name(cls, resource):
+        return resource.get(cls.name)
 
 
 class ChildTypeInfo(TypeInfo):

@@ -1,4 +1,3 @@
-# Copyright 2015-2018 Capital One Services, LLC
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 import collections
@@ -254,6 +253,50 @@ class SqlServerTest(BaseTest):
                 {'type': 'firewall-bypass',
                  'mode': 'equal',
                  'list': ['AzureServices']}],
+        })
+        resources = p.run()
+        self.assertEqual(1, len(resources))
+
+    @cassette_name('administrators')
+    def test_administrators_filter(self):
+        """
+        It is not practical to programmatically assign AD
+        users/administrators for testing, but a test for missing
+        administrator still verifies most of the code.
+        """
+        p = self.load_policy({
+            'name': 'test-azure-sql-server',
+            'resource': 'azure.sqlserver',
+            'filters': [
+                {'type': 'value',
+                 'key': 'name',
+                 'op': 'glob',
+                 'value_type': 'normalize',
+                 'value': 'cctestsqlserver*'},
+                {'type': 'azure-ad-administrators',
+                 'key': 'login',
+                 'value': 'absent'}],
+        })
+        resources = p.run()
+        self.assertEqual(1, len(resources))
+
+    @cassette_name('vulnerability-scan')
+    def test_vulnerability_filter(self):
+        """
+        Vulnerability scans require expensive account level defender
+        subscriptions so we'll only test the negative here.
+        """
+        p = self.load_policy({
+            'name': 'test-azure-sql-server',
+            'resource': 'azure.sqlserver',
+            'filters': [
+                {'type': 'value',
+                 'key': 'name',
+                 'op': 'glob',
+                 'value_type': 'normalize',
+                 'value': 'cctestsqlserver*'},
+                {'type': 'vulnerability-assessment',
+                 'enabled': False}],
         })
         resources = p.run()
         self.assertEqual(1, len(resources))
