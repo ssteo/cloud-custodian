@@ -1,5 +1,6 @@
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
+import c7n.filters.vpc as net_filters
 from c7n.actions import Action
 from c7n.filters.vpc import SecurityGroupFilter, SubnetFilter, VpcFilter
 from c7n.manager import resources
@@ -10,6 +11,7 @@ from c7n.utils import local_session, type_schema, get_retry
 from botocore.waiter import WaiterModel, create_waiter_with_client
 from .aws import shape_validate
 from .ecs import ContainerConfigSource
+from c7n.filters.kms import KmsRelatedFilter
 
 
 @query.sources.register('describe-eks-nodegroup')
@@ -118,11 +120,18 @@ class EKSSGFilter(SecurityGroupFilter):
 
     RelatedIdsExpression = "resourcesVpcConfig.securityGroupIds[]"
 
+EKS.filter_registry.register('network-location', net_filters.NetworkLocation)
+
 
 @EKS.filter_registry.register('vpc')
 class EKSVpcFilter(VpcFilter):
 
     RelatedIdsExpression = 'resourcesVpcConfig.vpcId'
+
+
+@EKS.filter_registry.register('kms-key')
+class KmsFilter(KmsRelatedFilter):
+    RelatedIdsExpression = 'encryptionConfig[].provider.keyArn'
 
 
 @EKS.action_registry.register('tag')

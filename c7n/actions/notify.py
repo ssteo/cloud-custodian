@@ -220,6 +220,14 @@ class Notify(BaseNotify):
                 r.pop('c7n:user-data')
         return resources
 
+    def prepare_iam_saml_provider(self, resources):
+        for r in resources:
+            if 'SAMLMetadataDocument' in r:
+                r.pop('SAMLMetadataDocument')
+            if 'IDPSSODescriptor' in r:
+                r.pop('IDPSSODescriptor')
+        return resources
+
     def send_data_message(self, message):
         if self.data['transport']['type'] == 'sqs':
             return self.send_sqs(message)
@@ -250,11 +258,12 @@ class Notify(BaseNotify):
             for k, v in user_attributes.items():
                 if k != 'mtype':
                     attrs[k] = {'DataType': 'String', 'StringValue': v}
-        client.publish(
+        result = client.publish(
             TopicArn=topic_arn,
             Message=self.pack(message),
             MessageAttributes=attrs
         )
+        return result['MessageId']
 
     def send_sqs(self, message):
         queue = self.data['transport']['queue'].format(**message)

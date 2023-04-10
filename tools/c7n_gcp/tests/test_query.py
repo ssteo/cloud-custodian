@@ -9,7 +9,7 @@ from gcp_common import BaseTest
 
 
 def test_gcp_resource_metadata_asset_type():
-    load_resources('gcp.*')
+    load_resources(('gcp.*',))
     # asset inventory doesn't support these
     whitelist = set((
         'app-engine-domain',
@@ -21,6 +21,7 @@ def test_gcp_resource_metadata_asset_type():
         'build',
         'dataflow-job',
         'dm-deployment',
+        'secret',
         'function',
         'loadbalancer-ssl-policy',
         'log-exclusion',

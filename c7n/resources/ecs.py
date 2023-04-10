@@ -80,6 +80,14 @@ class ContainerConfigSource(ConfigSource):
         return resource
 
 
+class ClusterDescribe(query.DescribeSource):
+
+    def augment(self, resources):
+        resources = super(ClusterDescribe, self).augment(resources)
+        ecs_tag_normalize(resources)
+        return resources
+
+
 @resources.register('ecs')
 class ECSCluster(query.QueryResourceManager):
 
@@ -87,16 +95,16 @@ class ECSCluster(query.QueryResourceManager):
         service = 'ecs'
         enum_spec = ('list_clusters', 'clusterArns', None)
         batch_detail_spec = (
-            'describe_clusters', 'clusters', None, 'clusters', {'include': ['TAGS']})
+            'describe_clusters', 'clusters', None, 'clusters', {'include': ['TAGS', 'SETTINGS']})
         name = "clusterName"
         arn = id = "clusterArn"
         arn_type = 'cluster'
-        cfn_type = 'AWS::ECS::Cluster'
+        config_type = cfn_type = 'AWS::ECS::Cluster'
 
-    def augment(self, resources):
-        resources = super(ECSCluster, self).augment(resources)
-        ecs_tag_normalize(resources)
-        return resources
+    source_mapping = {
+        'describe': ClusterDescribe,
+        'config': query.ConfigSource
+    }
 
 
 @ECSCluster.filter_registry.register('metrics')
@@ -586,24 +594,55 @@ class DeleteTaskDefinition(BaseAction):
     The definition will be marked as InActive. Currently running
     services and task can still reference, new services & tasks
     can't.
+    
+    force is False by default. When given as True, the task definition will 
+    be permanently deleted.
+    
+    .. code-block:: yaml
+
+       policies:
+         - name: deregister-task-definition
+           resource: ecs-task-definition
+           filters:
+             - family: test-task-def
+           actions:
+             - type: delete
+
+         - name: delete-task-definition
+           resource: ecs-task-definition
+           filters:
+             - family: test-task-def
+           actions:
+             - type: delete
+               force: True
     """
 
-    schema = type_schema('delete')
-    permissions = ('ecs:DeregisterTaskDefinition',)
+    schema = type_schema('delete', force={'type': 'boolean'})
+    permissions = ('ecs:DeregisterTaskDefinition','ecs:DeleteTaskDefinitions',)
 
     def process(self, resources):
         client = local_session(self.manager.session_factory).client('ecs')
         retry = get_retry(('Throttling',))
+        force = self.data.get('force', False)
 
         for r in resources:
+            if r['status'] == 'INACTIVE':
+                continue
             try:
                 retry(client.deregister_task_definition,
                       taskDefinition=r['taskDefinitionArn'])
             except ClientError as e:
-                # No error code for not found.
                 if e.response['Error'][
-                        'Message'] != 'The specified task definition does not exist.':
+                    'Message'] != 'The specified task definition does not exist.':
                     raise
+
+        if force:
+            task_definitions_arns = [
+                r['taskDefinitionArn']
+                for r in resources
+            ]
+            for chunk in chunks(task_definitions_arns, size=10):
+                retry(client.delete_task_definitions, taskDefinitions=chunk)
 
 
 @resources.register('ecs-container-instance')
@@ -643,6 +682,12 @@ class ECSContainerInstanceDescribeSource(ECSClusterResourceDescribeSource):
             results.extend(r)
         ecs_tag_normalize(results)
         return results
+
+
+@ContainerInstance.filter_registry.register('subnet')
+class ContainerInstanceSubnetFilter(net_filters.SubnetFilter):
+
+    RelatedIdsExpression = "attributes[?name == 'ecs.subnet-id'].value[]"
 
 
 @ContainerInstance.action_registry.register('set-state')
