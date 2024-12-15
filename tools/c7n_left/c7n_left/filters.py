@@ -3,7 +3,7 @@
 #
 import itertools
 
-from c7n.filters import Filter, ValueFilter, OPERATORS
+from c7n.filters import Filter, OPERATORS
 from c7n.utils import type_schema
 
 
@@ -67,7 +67,7 @@ class Traverse(Filter):
             },
         },
         required=("resources",),
-        **{"count-op": {"$ref": "#/definitions/filters_common/comparison_operators"}}
+        **{"count-op": {"$ref": "#/definitions/filters_common/comparison_operators"}},
     )
 
     _vfilters = None
@@ -88,9 +88,7 @@ class Traverse(Filter):
         for r in resources:
             working_set = (r,)
             for target_type in self.type_chain:
-                working_set = self.resolve_refs(
-                    target_type, working_set, event["graph"]
-                )
+                working_set = self.resolve_refs(target_type, working_set, event["graph"])
             matched = self.match_attrs(working_set)
             if not self.match_cardinality(matched):
                 continue
@@ -102,14 +100,7 @@ class Traverse(Filter):
     def get_attr_filters(self):
         if self._vfilters:
             return self._vfilters
-        vfilters = []
-        filter_class = ValueFilter
-        for v in self.data.get("attrs", []):
-            if isinstance(v, dict) and v.get("type"):
-                filter_class = self.manager.filter_registry[v["type"]]
-            vf = filter_class(v, self.manager)
-            vf.annotate = False
-            vfilters.append(vf)
+        vfilters = self.manager.filter_registry.parse(self.data.get("attrs", []), self.manager)
         self._vfilters = vfilters
         return vfilters
 
@@ -126,9 +117,9 @@ class Traverse(Filter):
 
     def match_attrs(self, working_set):
         vfilters = self.get_attr_filters()
-        found = True
         results = []
         for w in working_set:
+            found = True
             for v in vfilters:
                 if not v(w):
                     found = False

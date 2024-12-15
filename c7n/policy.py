@@ -10,7 +10,6 @@ import time
 from typing import List
 
 from dateutil import parser, tz as tzutil
-import jmespath
 
 from c7n.cwe import CloudWatchEvents
 from c7n.ctx import ExecutionContext
@@ -25,7 +24,7 @@ from c7n import deprecated, utils
 from c7n.version import version
 from c7n.query import RetryPageIterator
 from c7n.varfmt import VarFormat
-from c7n.utils import get_policy_provider
+from c7n.utils import get_policy_provider, jmespath_compile
 
 log = logging.getLogger('c7n.policy')
 
@@ -393,9 +392,8 @@ class LambdaMode(ServerlessExecutionMode):
             # Lambda passthrough config
             'layers': {'type': 'array', 'items': {'type': 'string'}},
             'concurrency': {'type': 'integer'},
-            # Do we really still support 2.7 and 3.6?
-            'runtime': {'enum': ['python2.7', 'python3.6',
-                                 'python3.7', 'python3.8', 'python3.9']},
+            'runtime': {'enum': ['python3.8', 'python3.9', 'python3.10',
+                                 'python3.11', 'python3.12']},
             'role': {'type': 'string'},
             'handler': {'type': 'string'},
             'pattern': {'type': 'object', 'minProperties': 1},
@@ -414,10 +412,26 @@ class LambdaMode(ServerlessExecutionMode):
     def validate(self):
         super(LambdaMode, self).validate()
         prefix = self.policy.data['mode'].get('function-prefix', 'custodian-')
-        if len(prefix + self.policy.name) > 64:
+        MAX_LAMBDA_FUNCTION_NAME_LENGTH = 64
+        if len(prefix + self.policy.name) > MAX_LAMBDA_FUNCTION_NAME_LENGTH:
             raise PolicyValidationError(
-                "Custodian Lambda policies have a max length with prefix of 64"
-                " policy:%s prefix:%s" % (prefix, self.policy.name))
+                "Custodian Lambda policies have a max length with prefix of %s"
+                " policy:%s prefix:%s" % (
+                    MAX_LAMBDA_FUNCTION_NAME_LENGTH,
+                    self.policy.name,
+                    prefix
+                )
+            )
+        MAX_LAMBDA_FUNCTION_DESCRIPTION_LENGTH = 256
+        if len(self.policy.description) > MAX_LAMBDA_FUNCTION_DESCRIPTION_LENGTH:
+            raise PolicyValidationError(
+                'Custodian Lambda policies have a max description length of %s'
+                ' policy: %s description: %s' % (
+                    MAX_LAMBDA_FUNCTION_DESCRIPTION_LENGTH,
+                    self.policy.name,
+                    self.policy.description
+                )
+            )
         tags = self.policy.data['mode'].get('tags')
         if not tags:
             return
@@ -550,6 +564,13 @@ class LambdaMode(ServerlessExecutionMode):
         tags = self.policy.data['mode'].setdefault('tags', {})
         tags['custodian-info'] = "mode=%s:version=%s" % (
             self.policy.data['mode']['type'], version)
+        # auto tag with schedule name and group to link function to
+        # EventBridge schedule when using schedule mode
+        if self.policy.data['mode']['type'] == 'schedule':
+            prefix = self.policy.data['mode'].get('function-prefix', 'custodian-')
+            name = self.policy.data['name']
+            group = self.policy.data['mode'].get('group-name', 'default')
+            tags['custodian-schedule'] = f'name={prefix + name}:group={group}'
 
         from c7n import mu
         with self.policy.ctx:
@@ -572,13 +593,37 @@ class LambdaMode(ServerlessExecutionMode):
 class PeriodicMode(LambdaMode, PullMode):
     """A policy that runs in pull mode within lambda.
 
-    Runs Custodian in AWS lambda at user defined cron interval.
+    Runs Custodian in AWS lambda at user defined cron interval using EventBridge rules.
     """
 
     POLICY_METRICS = ('ResourceCount', 'ResourceTime', 'ActionTime')
 
     schema = utils.type_schema(
         'periodic', schedule={'type': 'string'}, rinherit=LambdaMode.schema)
+
+    def run(self, event, lambda_context):
+        return PullMode.run(self)
+
+
+@execution.register('schedule')
+class ScheduleMode(LambdaMode, PullMode):
+    """A policy that runs in pull mode within lambda.
+
+    Runs Custodian in AWS lambda at user defined cron interval using EventBridge Scheduler.
+    """
+
+    POLICY_METRICS = ('ResourceCount', 'ResourceTime', 'ActionTime')
+
+    schema = utils.type_schema(
+        'schedule',
+        schedule={'type': 'string'},
+        timezone={'type': 'string'},
+        **{'start-date': {'type': 'string'},
+           'end-date': {'type': 'string'},
+           'scheduler-role': {'type': 'string'},
+           'group-name': {'type': 'string'}},
+        required=['schedule'],
+        rinherit=LambdaMode.schema)
 
     def run(self, event, lambda_context):
         return PullMode.run(self)
@@ -676,7 +721,7 @@ class CloudTrailMode(LambdaMode):
             if isinstance(e, str):
                 assert e in CloudWatchEvents.trail_events, "event shortcut not defined: %s" % e
             if isinstance(e, dict):
-                jmespath.compile(e['ids'])
+                jmespath_compile(e['ids'])
         if isinstance(self.policy.resource_manager, query.ChildResourceManager):
             if not getattr(self.policy.resource_manager.resource_type,
                            'supports_trailevents', False):
@@ -741,9 +786,9 @@ class GuardDutyMode(LambdaMode):
     supported_resources = ('account', 'ec2', 'iam-user')
 
     id_exprs = {
-        'account': jmespath.compile('detail.accountId'),
-        'ec2': jmespath.compile('detail.resource.instanceDetails.instanceId'),
-        'iam-user': jmespath.compile('detail.resource.accessKeyDetails.userName')}
+        'account': jmespath_compile('detail.accountId'),
+        'ec2': jmespath_compile('detail.resource.instanceDetails.instanceId'),
+        'iam-user': jmespath_compile('detail.resource.accessKeyDetails.userName')}
 
     def get_member_account_id(self, event):
         return event['detail']['accountId']
@@ -1150,6 +1195,10 @@ class Policy:
         return self.data['name']
 
     @property
+    def description(self) -> str:
+        return self.data.get('description', '')
+
+    @property
     def resource_type(self) -> str:
         return self.data['resource']
 
@@ -1242,7 +1291,12 @@ class Policy:
             'op': '{op}',
             'action_date': '{action_date}',
             # tag action pyformat-date handling
-            'now': utils.FormatDate(datetime.utcnow()),
+            # defer expansion until runtime for serverless modes
+            'now': (
+                utils.DeferredFormatString('now')
+                if isinstance(self.get_execution_mode(), ServerlessExecutionMode)
+                else utils.FormatDate(datetime.utcnow())
+            ),
             # account increase limit action
             'service': '{service}',
             # s3 set logging action :-( see if we can revisit this one.

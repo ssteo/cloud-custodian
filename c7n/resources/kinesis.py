@@ -1,18 +1,17 @@
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
-import jmespath
 
 from c7n.actions import Action
 from c7n.manager import resources
 from c7n.filters.kms import KmsRelatedFilter
+from c7n.filters import CrossAccountAccessFilter
 from c7n.query import (
     ConfigSource,
     DescribeWithResourceTags, QueryResourceManager, TypeInfo)
 from c7n.filters.vpc import SubnetFilter
-from c7n.utils import local_session, type_schema, get_retry
+from c7n.utils import local_session, type_schema, get_retry, jmespath_search
 from c7n.tags import (
     TagDelayedAction, RemoveTag, TagActionFilter, Tag)
-
 
 
 class ConfigStream(ConfigSource):
@@ -46,6 +45,7 @@ class KinesisStream(QueryResourceManager):
         dimension = 'StreamName'
         universal_taggable = True
         config_type = cfn_type = 'AWS::Kinesis::Stream'
+        permissions_augment = ("kinesis:ListTagsForStream",)
 
     source_mapping = {
         'describe': DescribeWithResourceTags,
@@ -147,7 +147,7 @@ class DeliveryStream(QueryResourceManager):
         date = 'CreateTimestamp'
         dimension = 'DeliveryStreamName'
         universal_taggable = object()
-        cfn_type = 'AWS::KinesisFirehose::DeliveryStream'
+        config_type = cfn_type = 'AWS::KinesisFirehose::DeliveryStream'
 
     source_mapping = {
         'describe': DescribeWithResourceTags,
@@ -250,7 +250,7 @@ class FirehoseEncryptS3Destination(Action):
                 for k in dmetadata['clear']:
                     dinfo.pop(k, None)
                 if dmetadata['encrypt_path']:
-                    encrypt_info = jmespath.search(dmetadata['encrypt_path'], dinfo)
+                    encrypt_info = jmespath_search(dmetadata['encrypt_path'], dinfo)
                 else:
                     encrypt_info = dinfo
                 encrypt_info.pop('NoEncryptionConfig', None)
@@ -355,7 +355,7 @@ class KinesisVideoStream(QueryResourceManager):
     class resource_type(TypeInfo):
         service = 'kinesisvideo'
         arn_type = 'stream'
-        enum_spec = ('list_streams', 'StreamInfoList', None)
+        enum_spec = ('list_streams', 'StreamInfoList', {'MaxResults': 10000})
         name = id = 'StreamName'
         arn = 'StreamARN'
         dimension = 'StreamName'
@@ -365,8 +365,10 @@ class KinesisVideoStream(QueryResourceManager):
         'config': ConfigSource
     }
 
+
 KinesisVideoStream.action_registry.register('mark-for-op', TagDelayedAction)
 KinesisVideoStream.filter_registry.register('marked-for-op', TagActionFilter)
+
 
 @KinesisVideoStream.action_registry.register('delete')
 class DeleteVideoStream(Action):
@@ -401,6 +403,7 @@ class KmsFilterVideoStream(KmsRelatedFilter):
 
     RelatedIdsExpression = 'KmsKeyId'
 
+
 @KinesisVideoStream.action_registry.register("tag")
 class TagVideoStream(Tag):
     """Action to add tag/tags to Kinesis Video streams resource
@@ -420,15 +423,16 @@ class TagVideoStream(Tag):
                     value: "KinesisVideo Tag Value"
     """
     permissions = ('kinesisvideo:TagResource',)
-    
+
     def process_resource_set(self, client, resource_set, tag_keys):
         for r in resource_set:
             self.manager.retry(
-                client.tag_resource, 
-                ResourceARN=r['StreamARN'], 
-                Tags=tag_keys, 
+                client.tag_resource,
+                ResourceARN=r['StreamARN'],
+                Tags=tag_keys,
                 ignore_err_codes=("ResourceNotFoundException",))
-            
+
+
 @KinesisVideoStream.action_registry.register('remove-tag')
 class VideoStreamRemoveTag(RemoveTag):
     """Action to remove tag/tags from a Kinesis Video streams resource
@@ -446,14 +450,48 @@ class VideoStreamRemoveTag(RemoveTag):
                   - type: remove-tag
                     tags: ["KinesisVideoTag"]
     """
-    
+
     permissions = ('kinesisvideo:UntagResource',)
-    
+
     def process_resource_set(self, client, resource_set, tag_keys):
         for r in resource_set:
             self.manager.retry(
-                client.untag_resource, 
-                ResourceARN=r['StreamARN'], 
-                TagKeyList=tag_keys, 
+                client.untag_resource,
+                ResourceARN=r['StreamARN'],
+                TagKeyList=tag_keys,
                 ignore_err_codes=("ResourceNotFoundException",))
 
+
+@KinesisStream.filter_registry.register('cross-account')
+class KinesisStreamCrossAccount(CrossAccountAccessFilter):
+    """Filters all Kinesis Data Streams with cross-account access
+
+    :example:
+
+    .. code-block:: yaml
+
+            policies:
+              - name: kinesis-cross-account
+                resource: kinesis
+                filters:
+                  - type: cross-account
+                    whitelist_from:
+                      expr: "accounts.*.accountNumber"
+                      url: accounts_url
+    """
+
+    permissions = ('kinesis:GetResourcePolicy',)
+    policy_annotation = "c7n:Policy"
+
+    def get_resource_policy(self, r):
+        client = local_session(self.manager.session_factory).client('kinesis')
+        if self.policy_annotation in r:
+            return r[self.policy_annotation]
+        result = self.manager.retry(
+                client.get_resource_policy,
+                ResourceARN=r['StreamARN'],
+                ignore_err_codes=('ResourceNotFoundException'))
+        if result:
+            policy = result.get(self.policy_attribute, None)
+            r[self.policy_annotation] = policy
+        return policy

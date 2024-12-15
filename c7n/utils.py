@@ -1,6 +1,7 @@
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
 import copy
+from collections import UserString
 from datetime import datetime, timedelta
 from dateutil.tz import tzutc
 import json
@@ -16,8 +17,11 @@ import time
 from urllib import parse as urlparse
 from urllib.request import getproxies, proxy_bypass
 
-
 from dateutil.parser import ParserError, parse
+
+import jmespath
+from jmespath import functions
+from jmespath.parser import Parser, ParsedResult
 
 from c7n import config
 from c7n.exceptions import ClientError, PolicyValidationError
@@ -91,9 +95,9 @@ def loads(body):
 
 def dumps(data, fh=None, indent=0):
     if fh:
-        return json.dump(data, fh, cls=DateTimeEncoder, indent=indent)
+        return json.dump(data, fh, cls=JsonEncoder, indent=indent)
     else:
-        return json.dumps(data, cls=DateTimeEncoder, indent=indent)
+        return json.dumps(data, cls=JsonEncoder, indent=indent)
 
 
 def format_event(evt):
@@ -208,13 +212,15 @@ def type_schema(
     return s
 
 
-class DateTimeEncoder(json.JSONEncoder):
+class JsonEncoder(json.JSONEncoder):
 
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
         if isinstance(obj, FormatDate):
             return obj.datetime.isoformat()
+        if isinstance(obj, bytes):
+            return obj.decode('utf8', errors="ignore")
         return json.JSONEncoder.default(self, obj)
 
 
@@ -334,6 +340,9 @@ def local_session(factory, region=None):
 def reset_session_cache():
     for k in [k for k in dir(CONN_CACHE) if not k.startswith('_')]:
         setattr(CONN_CACHE, k, {})
+
+    from .credentials import CustodianSession
+    CustodianSession.close()
 
 
 def annotation(i, k):
@@ -642,7 +651,7 @@ def get_policy_provider(policy_data):
     if isinstance(policy_data['resource'], list):
         provider_name, _ = policy_data['resource'][0].split('.', 1)
     elif '.' in policy_data['resource']:
-        provider_name, resource_type = policy_data['resource'].split('.', 1)
+        provider_name, _ = policy_data['resource'].split('.', 1)
     else:
         provider_name = 'aws'
     return provider_name
@@ -678,6 +687,16 @@ def get_proxy_url(url):
             return proxies[key]
 
     return None
+
+
+class DeferredFormatString(UserString):
+    """A string that returns itself when formatted
+
+    Let any format spec pass through. This lets us selectively defer
+    expansion of runtime variables without losing format spec details.
+    """
+    def __format__(self, format_spec):
+        return "".join(("{", self.data, f":{format_spec}" if format_spec else "", "}"))
 
 
 class FormatDate:
@@ -855,6 +874,18 @@ def get_support_region(manager):
     return support_region
 
 
+def get_resource_tagging_region(resource_type, region):
+    # For global resources, tags don't populate in the get_resources call
+    # unless the call is being made to us-east-1. For govcloud this is us-gov-west-1.
+
+    partition = get_partition(region)
+    if partition == "aws":
+        return getattr(resource_type, 'global_resource', None) and 'us-east-1' or region
+    elif partition == "aws-us-gov":
+        return getattr(resource_type, 'global_resource', None) and 'us-gov-west-1' or region
+    return region
+
+
 def get_eni_resource_type(eni):
     if eni.get('Attachment'):
         instance_id = eni['Attachment'].get('InstanceId')
@@ -898,8 +929,10 @@ def get_eni_resource_type(eni):
         rtype = 'hsmv2'
     elif description.startswith('AWS Lambda VPC ENI'):
         rtype = 'lambda'
+    elif description.startswith('AWS Lambda VPC'):
+        rtype = 'lambda'
     elif description.startswith('Interface for NAT Gateway'):
-        return 'nat'
+        rtype = 'nat'
     elif (description == 'RDSNetworkInterface' or
             description.startswith('Network interface for DBProxy')):
         rtype = 'rds'
@@ -909,6 +942,71 @@ def get_eni_resource_type(eni):
         rtype = 'tgw'
     elif description.startswith('VPC Endpoint Interface'):
         rtype = 'vpce'
+    elif description.startswith('aws-k8s-branch-eni'):
+        rtype = 'eks'
     else:
         rtype = 'unknown'
     return rtype
+
+
+class C7NJmespathFunctions(functions.Functions):
+    @functions.signature(
+        {'types': ['string']}, {'types': ['string']}
+    )
+    def _func_split(self, sep, string):
+        return string.split(sep)
+
+    @functions.signature(
+        {'types': ['string']}
+    )
+    def _func_from_json(self, string):
+        try:
+            return json.loads(string)
+        except json.JSONDecodeError:
+            return None
+
+
+class C7NJMESPathParser(Parser):
+    def parse(self, expression):
+        result = super().parse(expression)
+        return ParsedResultWithOptions(
+            expression=result.expression,
+            parsed=result.parsed
+        )
+
+
+class ParsedResultWithOptions(ParsedResult):
+    def search(self, value, options=None):
+        # if options are explicitly passed in, we honor those
+        if not options:
+            options = jmespath.Options(custom_functions=C7NJmespathFunctions())
+        return super().search(value, options)
+
+
+def jmespath_search(*args, **kwargs):
+    return jmespath.search(
+        *args,
+        **kwargs,
+        options=jmespath.Options(custom_functions=C7NJmespathFunctions())
+    )
+
+
+def get_path(path: str, resource: dict):
+    """
+    This function provides a wrapper to obtain a value from a resource
+    in an efficient manner.
+    jmespath_search is expensive and it's rarely the case that
+    there is a path in the id field, therefore this wrapper is an optimisation.
+
+    :param path: the path or field name to fetch
+    :param resource: the resource instance description
+    :return: the field/path value
+    """
+    if '.' in path:
+        return jmespath_search(path, resource)
+    return resource[path]
+
+
+def jmespath_compile(expression):
+    parsed = C7NJMESPathParser().parse(expression)
+    return parsed

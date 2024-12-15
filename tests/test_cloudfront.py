@@ -1,10 +1,8 @@
 # Copyright The Cloud Custodian Authors.
 # SPDX-License-Identifier: Apache-2.0
-import jmespath
-
 from .common import BaseTest, event_data
 from c7n.resources.aws import shape_validate
-from c7n.utils import local_session
+from c7n.utils import local_session, jmespath_compile
 from unittest.mock import MagicMock
 
 
@@ -264,7 +262,7 @@ class CloudFront(BaseTest):
         )
         resources = p.run()
         self.assertEqual(len(resources), 1)
-        expr = jmespath.compile(k)
+        expr = jmespath_compile(k)
         r = expr.search(resources[0])
         self.assertTrue("allow-all" in r)
 
@@ -301,7 +299,7 @@ class CloudFront(BaseTest):
         )
         resources = p.run()
         self.assertEqual(len(resources), 1)
-        expr = jmespath.compile(k)
+        expr = jmespath_compile(k)
         r = expr.search(resources[0])
         self.assertTrue("TLSv1" in r)
 
@@ -800,6 +798,28 @@ class CloudFront(BaseTest):
             'AwsCloudFrontDistributionDetails',
             'securityhub')
 
+    def test_origin_access_control(self):
+        factory = self.replay_flight_data("test_origin_access_control")
+
+        p = self.load_policy(
+            {
+                "name": "origin-access-control-signing-behavior",
+                "resource": "origin-access-control",
+                "filters": [
+                    {
+                        "type": "value",
+                        "key": "SigningBehavior",
+                        "value": "always",
+                        "op": "eq"
+                    }
+                ],
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]['Name'], "c7n-signing-behavior-always-oac")
+
 
 class CloudFrontWafV2(BaseTest):
 
@@ -875,3 +895,21 @@ class CloudFrontWafV2(BaseTest):
         )
         resources = p.run()
         self.assertEqual(len(resources), 2)
+
+    def test_wafv2_value(self):
+        factory = self.replay_flight_data("test_distribution_wafv2_value")
+        p = self.load_policy(
+            {
+                "name": "wafv2-value-cfront",
+                "resource": "distribution",
+                "filters": [{
+                    "type": "wafv2-enabled",
+                    "key": "length(Rules)",
+                    "op": "gte",
+                    "value": 1
+                }]
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
